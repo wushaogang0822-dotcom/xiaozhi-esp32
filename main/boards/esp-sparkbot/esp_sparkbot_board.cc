@@ -15,7 +15,9 @@
 #include <cstring>
 
 #include "esp_video.h"
-
+extern "C" {
+#include "aqi_pet.h"
+}
 #define TAG "esp_sparkbot"
 
 class SparkBotEs8311AudioCodec : public Es8311AudioCodec {
@@ -271,6 +273,9 @@ public:
         InitializeI2c();
         InitializeSpi();
         InitializeDisplay();
+        pet_game_init();
+        pet_display_init(nullptr);
+        lv_timer_create([](lv_timer_t*) { pet_display_update(); }, 200, nullptr);
         InitializeButtons();
         InitializeCamera();
         InitializeEchoUart();
