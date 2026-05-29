@@ -426,7 +426,13 @@ void pet_display_init(lv_obj_t* parent)
  
 void pet_display_update(void)
 {
-    if (!g_dog_canvas) return;
+    // 确保宠物始终显示在最上层
+    if (g_dog_canvas) lv_obj_move_foreground(g_dog_canvas);
+    if (g_lv_label)   lv_obj_move_foreground(g_lv_label);
+    
+    // ... 后面原有代码不变 ...
+    
+ if (!g_dog_canvas) return;
  
     const PetState* st = pet_get_state();
     bool night = (pet_get_time_period() == TIME_NIGHT);
