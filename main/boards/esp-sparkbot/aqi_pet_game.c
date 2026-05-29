@@ -17,7 +17,6 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "nvs_flash.h"
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
@@ -167,12 +166,8 @@ void pet_game_init(void)
 {
     memset(&g_pet, 0, sizeof(g_pet));
 
-    /* NVS 初始化（如果 main 里已初始化可省略） */
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase();
-        nvs_flash_init();
-    }
+    /* 注意：不在这里调用 nvs_flash_init()
+     * xiaozhi-esp32 主程序已在启动时初始化 NVS，重复调用会导致崩溃 */
 
     _nvs_load();
     g_pet.saved.stage = _xp_to_stage(g_pet.saved.total_xp);
