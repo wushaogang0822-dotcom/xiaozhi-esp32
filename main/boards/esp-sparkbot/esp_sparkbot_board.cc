@@ -274,8 +274,8 @@ public:
         InitializeSpi();
         InitializeDisplay();
         pet_game_init();
-        pet_display_init(nullptr);
-        lv_timer_create([](lv_timer_t*) { pet_display_update(); }, 200, nullptr);
+        //pet_display_init(nullptr);
+        //lv_timer_create([](lv_timer_t*) { pet_display_update(); }, 200, nullptr);
         InitializeButtons();
         InitializeCamera();
         InitializeEchoUart();
