@@ -274,8 +274,12 @@ public:
         InitializeSpi();
         InitializeDisplay();
         pet_game_init();
-        //pet_display_init(nullptr);
-        //lv_timer_create([](lv_timer_t*) { pet_display_update(); }, 200, nullptr);
+        
+        // 延迟初始化 display，等 LVGL 主循环跑起来后再执行
+        lv_async_call([](void*) {
+            pet_display_init(nullptr);
+            lv_timer_create([](lv_timer_t*) { pet_display_update(); }, 200, nullptr);
+        }, nullptr);
         InitializeButtons();
         InitializeCamera();
         InitializeEchoUart();
