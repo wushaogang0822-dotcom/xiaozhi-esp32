@@ -6,41 +6,83 @@
 #include "config.h"
 #include "mcp_server.h"
 #include "settings.h"
-
 #include <esp_log.h>
 #include <esp_lcd_panel_vendor.h>
 #include <driver/i2c_master.h>
 #include <driver/spi_common.h>
 #include <driver/uart.h>
 #include <cstring>
-
+#include <string>
 #include "esp_video.h"
+
 extern "C" {
 #include "aqi_pet.h"
 }
+
 #define TAG "esp_sparkbot"
 
-class SparkBotEs8311AudioCodec : public Es8311AudioCodec {
-private:    
+/* =========================================================
+   音频 Codec（SparkBot 定制版）
+   ========================================================= */
 
+class SparkBotEs8311AudioCodec : public Es8311AudioCodec {
 public:
-    SparkBotEs8311AudioCodec(void* i2c_master_handle, i2c_port_t i2c_port, int input_sample_rate, int output_sample_rate,
-                        gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din,
-                        gpio_num_t pa_pin, uint8_t es8311_addr, bool use_mclk = true)
-        : Es8311AudioCodec(i2c_master_handle, i2c_port, input_sample_rate, output_sample_rate,
-                             mclk,  bclk,  ws,  dout,  din,pa_pin,  es8311_addr,  use_mclk = true) {}
+    SparkBotEs8311AudioCodec(void* i2c_master_handle, i2c_port_t i2c_port,
+                             int input_sample_rate, int output_sample_rate,
+                             gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws,
+                             gpio_num_t dout, gpio_num_t din,
+                             gpio_num_t pa_pin, uint8_t es8311_addr,
+                             bool use_mclk = true)
+        : Es8311AudioCodec(i2c_master_handle, i2c_port,
+                           input_sample_rate, output_sample_rate,
+                           mclk, bclk, ws, dout, din,
+                           pa_pin, es8311_addr, use_mclk) {}
 
     void EnableOutput(bool enable) override {
-        if (enable == output_enabled_) {
-            return;
-        }
+        if (enable == output_enabled_) return;
         if (enable) {
             Es8311AudioCodec::EnableOutput(enable);
-        } else {
-           // Nothing todo because the display io and PA io conflict
         }
+        // 关闭时不操作（display IO 与 PA IO 冲突）
     }
 };
+
+/* =========================================================
+   阿奇宠物专用 Display 子类
+   拦截 SetChatMessage，扫描 AI 回复中的 [XP:XXX] 任务码，
+   触发经验值，并在显示前清洗掉码（TTS 通常不朗读方括号内容）
+   ========================================================= */
+
+class AqiPetSpiLcdDisplay : public SpiLcdDisplay {
+public:
+    using SpiLcdDisplay::SpiLcdDisplay;  // 继承全部构造函数
+
+    void SetChatMessage(const char* role, const char* content) override {
+        if (role && content && strcmp(role, "assistant") == 0) {
+            // 扫描任务码，触发 XP
+            pet_on_ai_message(content);
+
+            // 清洗任务码再显示
+            std::string clean(content);
+            static const char* codes[] = {
+                "[XP:WORD]", "[XP:SENT]", "[XP:POEM]",
+                "[XP:BRUSH]", "[XP:NOSE]", nullptr
+            };
+            for (int i = 0; codes[i]; i++) {
+                size_t pos;
+                while ((pos = clean.find(codes[i])) != std::string::npos)
+                    clean.erase(pos, strlen(codes[i]));
+            }
+            SpiLcdDisplay::SetChatMessage(role, clean.c_str());
+            return;
+        }
+        SpiLcdDisplay::SetChatMessage(role, content);
+    }
+};
+
+/* =========================================================
+   EspSparkBot Board
+   ========================================================= */
 
 class EspSparkBot : public WifiBoard {
 private:
@@ -51,7 +93,6 @@ private:
     light_mode_t light_mode_ = LIGHT_MODE_ALWAYS_ON;
 
     void InitializeI2c() {
-        // Initialize I2C peripheral
         i2c_master_bus_config_t i2c_bus_cfg = {
             .i2c_port = I2C_NUM_0,
             .sda_io_num = AUDIO_CODEC_I2C_SDA_PIN,
@@ -93,7 +134,6 @@ private:
         esp_lcd_panel_io_handle_t panel_io = nullptr;
         esp_lcd_panel_handle_t panel = nullptr;
 
-        // 液晶屏控制IO初始化
         ESP_LOGD(TAG, "Install panel IO");
         esp_lcd_panel_io_spi_config_t io_config = {};
         io_config.cs_gpio_num = DISPLAY_CS_GPIO;
@@ -105,26 +145,29 @@ private:
         io_config.lcd_param_bits = 8;
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, &panel_io));
 
-        // 初始化液晶屏驱动芯片
         ESP_LOGD(TAG, "Install LCD driver");
-
         esp_lcd_panel_dev_config_t panel_config = {};
         panel_config.reset_gpio_num = GPIO_NUM_NC;
         panel_config.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
         panel_config.bits_per_pixel = 16;
         ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(panel_io, &panel_config, &panel));
-        
+
         esp_lcd_panel_reset(panel);
         esp_lcd_panel_init(panel);
         esp_lcd_panel_invert_color(panel, true);
         esp_lcd_panel_disp_on_off(panel, true);
-        display_ = new SpiLcdDisplay(panel_io, panel,
-                                    DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+
+        // 使用阿奇宠物专用 Display（继承自 SpiLcdDisplay）
+        display_ = new AqiPetSpiLcdDisplay(
+            panel_io, panel,
+            DISPLAY_WIDTH, DISPLAY_HEIGHT,
+            DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y,
+            DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y,
+            DISPLAY_SWAP_XY
+        );
     }
 
     void InitializeCamera() {
-
-        // DVP pin configuration
         static esp_cam_ctlr_dvp_pin_config_t dvp_pin_config = {
             .data_width = CAM_CTLR_DATA_WIDTH_8,
             .data_io = {
@@ -143,14 +186,12 @@ private:
             .xclk_io = SPARKBOT_CAMERA_XCLK,
         };
 
-        // 复用 I2C 总线
         esp_video_init_sccb_config_t sccb_config = {
-            .init_sccb = false,  // 不初始化新的 SCCB，使用现有的 I2C 总线
-            .i2c_handle = i2c_bus_,  // 使用现有的 I2C 总线句柄
-            .freq = 100000,  // 100kHz
+            .init_sccb = false,
+            .i2c_handle = i2c_bus_,
+            .freq = 100000,
         };
 
-        // DVP configuration
         esp_video_init_dvp_config_t dvp_config = {
             .sccb_config = sccb_config,
             .reset_pin = SPARKBOT_CAMERA_RESET,
@@ -159,24 +200,21 @@ private:
             .xclk_freq = SPARKBOT_CAMERA_XCLK_FREQ,
         };
 
-        // Main video configuration
         esp_video_init_config_t video_config = {
             .dvp = &dvp_config,
         };
-        
-        camera_ = new EspVideo(video_config);
 
+        camera_ = new EspVideo(video_config);
         Settings settings("sparkbot", false);
-        // 考虑到部分复刻使用了不可动摄像头的设计，默认启用翻转
         bool camera_flipped = static_cast<bool>(settings.GetInt("camera-flipped", 1));
         camera_->SetHMirror(camera_flipped);
         camera_->SetVFlip(camera_flipped);
     }
 
     /*
-        ESP-SparkBot 的底座
-        https://gitee.com/esp-friends/esp_sparkbot/tree/master/example/tank/c2_tracked_chassis
-    */
+     * ESP-SparkBot 底座（履带底盘）
+     * https://gitee.com/esp-friends/esp_sparkbot/tree/master/example/tank/c2_tracked_chassis
+     */
     void InitializeEchoUart() {
         uart_config_t uart_config = {
             .baud_rate = ECHO_UART_BAUD_RATE,
@@ -187,15 +225,13 @@ private:
             .source_clk = UART_SCLK_DEFAULT,
         };
         int intr_alloc_flags = 0;
-
         ESP_ERROR_CHECK(uart_driver_install(ECHO_UART_PORT_NUM, BUF_SIZE * 2, 0, 0, NULL, intr_alloc_flags));
         ESP_ERROR_CHECK(uart_param_config(ECHO_UART_PORT_NUM, &uart_config));
         ESP_ERROR_CHECK(uart_set_pin(ECHO_UART_PORT_NUM, UART_ECHO_TXD, UART_ECHO_RXD, UART_ECHO_RTS, UART_ECHO_CTS));
-
         SendUartMessage("w2");
     }
 
-    void SendUartMessage(const char * command_str) {
+    void SendUartMessage(const char* command_str) {
         uint8_t len = strlen(command_str);
         uart_write_bytes(ECHO_UART_PORT_NUM, command_str, len);
         ESP_LOGI(TAG, "Sent command: %s", command_str);
@@ -203,69 +239,66 @@ private:
 
     void InitializeTools() {
         auto& mcp_server = McpServer::GetInstance();
-        // 定义设备的属性
-        mcp_server.AddTool("self.chassis.get_light_mode", "获取灯光效果编号", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
-            if (light_mode_ < 2) {
-                return 1;
-            } else {
-                return light_mode_ - 2;
-            }
-        });
 
-        mcp_server.AddTool("self.chassis.go_forward", "前进", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
-            SendUartMessage("x0.0 y1.0");
-            return true;
-        });
+        mcp_server.AddTool("self.chassis.get_light_mode", "获取灯光效果编号",
+            PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+                return (light_mode_ < 2) ? 1 : light_mode_ - 2;
+            });
 
-        mcp_server.AddTool("self.chassis.go_back", "后退", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
-            SendUartMessage("x0.0 y-1.0");
-            return true;
-        });
-
-        mcp_server.AddTool("self.chassis.turn_left", "向左转", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
-            SendUartMessage("x-1.0 y0.0");
-            return true;
-        });
-
-        mcp_server.AddTool("self.chassis.turn_right", "向右转", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
-            SendUartMessage("x1.0 y0.0");
-            return true;
-        });
-        
-        mcp_server.AddTool("self.chassis.dance", "跳舞", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
-            SendUartMessage("d1");
-            light_mode_ = LIGHT_MODE_MAX;
-            return true;
-        });
-
-        mcp_server.AddTool("self.chassis.switch_light_mode", "打开灯光效果", PropertyList({
-            Property("light_mode", kPropertyTypeInteger, 1, 6)
-        }), [this](const PropertyList& properties) -> ReturnValue {
-            char command_str[5] = {'w', 0, 0};
-            char mode = static_cast<light_mode_t>(properties["light_mode"].value<int>());
-
-            ESP_LOGI(TAG, "Switch Light Mode: %c", (mode + '0'));
-
-            if (mode >= 3 && mode <= 8) {
-                command_str[1] = mode + '0';
-                SendUartMessage(command_str);
+        mcp_server.AddTool("self.chassis.go_forward", "前进",
+            PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+                SendUartMessage("x0.0 y1.0");
                 return true;
-            }
-            throw std::runtime_error("Invalid light mode");
-        });
+            });
 
-        mcp_server.AddTool("self.camera.set_camera_flipped", "翻转摄像头图像方向", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
-            Settings settings("sparkbot", true);
-            // 考虑到部分复刻使用了不可动摄像头的设计，默认启用翻转
-            bool flipped = !static_cast<bool>(settings.GetInt("camera-flipped", 1));
-            
-            camera_->SetHMirror(flipped);
-            camera_->SetVFlip(flipped);
-            
-            settings.SetInt("camera-flipped", flipped ? 1 : 0);
-            
-            return true;
-        });
+        mcp_server.AddTool("self.chassis.go_back", "后退",
+            PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+                SendUartMessage("x0.0 y-1.0");
+                return true;
+            });
+
+        mcp_server.AddTool("self.chassis.turn_left", "向左转",
+            PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+                SendUartMessage("x-1.0 y0.0");
+                return true;
+            });
+
+        mcp_server.AddTool("self.chassis.turn_right", "向右转",
+            PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+                SendUartMessage("x1.0 y0.0");
+                return true;
+            });
+
+        mcp_server.AddTool("self.chassis.dance", "跳舞",
+            PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+                SendUartMessage("d1");
+                light_mode_ = LIGHT_MODE_MAX;
+                return true;
+            });
+
+        mcp_server.AddTool("self.chassis.switch_light_mode", "打开灯光效果",
+            PropertyList({Property("light_mode", kPropertyTypeInteger, 1, 6)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                char command_str[5] = {'w', 0, 0};
+                char mode = static_cast<light_mode_t>(properties["light_mode"].value<int>());
+                ESP_LOGI(TAG, "Switch Light Mode: %c", (mode + '0'));
+                if (mode >= 3 && mode <= 8) {
+                    command_str[1] = mode + '0';
+                    SendUartMessage(command_str);
+                    return true;
+                }
+                throw std::runtime_error("Invalid light mode");
+            });
+
+        mcp_server.AddTool("self.camera.set_camera_flipped", "翻转摄像头图像方向",
+            PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+                Settings settings("sparkbot", true);
+                bool flipped = !static_cast<bool>(settings.GetInt("camera-flipped", 1));
+                camera_->SetHMirror(flipped);
+                camera_->SetVFlip(flipped);
+                settings.SetInt("camera-flipped", flipped ? 1 : 0);
+                return true;
+            });
     }
 
 public:
@@ -273,13 +306,16 @@ public:
         InitializeI2c();
         InitializeSpi();
         InitializeDisplay();
+
+        // 游戏逻辑初始化（NVS读取、定时器）
         pet_game_init();
-        
-        // 延迟初始化 display，等 LVGL 主循环跑起来后再执行
+
+        // 延迟初始化 display，等 LVGL 主循环就绪后再执行
         lv_async_call([](void*) {
             pet_display_init(nullptr);
             lv_timer_create([](lv_timer_t*) { pet_display_update(); }, 200, nullptr);
         }, nullptr);
+
         InitializeButtons();
         InitializeCamera();
         InitializeEchoUart();
@@ -288,9 +324,13 @@ public:
     }
 
     virtual AudioCodec* GetAudioCodec() override {
-         static SparkBotEs8311AudioCodec audio_codec(i2c_bus_, I2C_NUM_0, AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
-            AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS, AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN,
-            AUDIO_CODEC_PA_PIN, AUDIO_CODEC_ES8311_ADDR);
+        static SparkBotEs8311AudioCodec audio_codec(
+            i2c_bus_, I2C_NUM_0,
+            AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
+            AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK,
+            AUDIO_I2S_GPIO_WS, AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN,
+            AUDIO_CODEC_PA_PIN, AUDIO_CODEC_ES8311_ADDR
+        );
         return &audio_codec;
     }
 
